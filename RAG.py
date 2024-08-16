@@ -1,7 +1,7 @@
 import streamlit as st
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_chroma import Chroma
+from langchain.vectorstores.faiss import FAISS  # Import FAISS for vector storage
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -11,15 +11,16 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
 import os
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 load_dotenv()
 
+# Load HuggingFace Embeddings model
 os.environ['HF_TOKEN'] = os.getenv("HF_TOKEN")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# Set up Streamlit
-st.title("Conversational RAG With PDF Uploads and Chat History")
+# Set up Streamlit interface
+st.title("Conversational RAG With PDF uploads and chat history")
 st.write("Upload PDFs and chat with their content")
 
 # Input the Groq API Key
@@ -29,16 +30,17 @@ api_key = st.text_input("Enter your Groq API key:", type="password")
 if api_key:
     llm = ChatGroq(groq_api_key=api_key, model_name="Gemma2-9b-It")
 
-    # Chat interface
+    # Session ID input for managing different chat histories
     session_id = st.text_input("Session ID", value="default_session")
 
-    # Statefully manage chat history
+    # Initialize session state for storing chat history
     if 'store' not in st.session_state:
         st.session_state.store = {}
 
-    uploaded_files = st.file_uploader("Choose A PDF file", type="pdf", accept_multiple_files=True)
+    # File uploader for PDF files
+    uploaded_files = st.file_uploader("Choose a PDF file", type="pdf", accept_multiple_files=True)
 
-    # Process uploaded PDFs
+    # Process uploaded PDF files
     if uploaded_files:
         documents = []
         for uploaded_file in uploaded_files:
@@ -47,19 +49,23 @@ if api_key:
                 file.write(uploaded_file.getvalue())
                 file_name = uploaded_file.name
 
+            # Load the PDF content
             loader = PyPDFLoader(temppdf)
             docs = loader.load()
             documents.extend(docs)
 
-        # Split and create embeddings for the documents
+        # Split the documents into manageable chunks and create embeddings
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
         splits = text_splitter.split_documents(documents)
-        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+
+        # Use FAISS for local in-memory vector storage
+        vectorstore = FAISS.from_documents(documents=splits, embedding=embeddings)
         retriever = vectorstore.as_retriever()
 
+        # System prompt for contextualizing questions with chat history
         contextualize_q_system_prompt = (
-            "Given a chat history and the latest user question"
-            " which might reference context in the chat history, "
+            "Given a chat history and the latest user question, "
+            "which might reference context in the chat history, "
             "formulate a standalone question which can be understood "
             "without the chat history. Do NOT answer the question, "
             "just reformulate it if needed and otherwise return it as is."
@@ -72,9 +78,10 @@ if api_key:
             ]
         )
 
+        # Create history-aware retriever
         history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-        # Answer question
+        # System prompt for generating concise answers
         system_prompt = (
             "You are an assistant for question-answering tasks. "
             "Use the following pieces of retrieved context to answer "
@@ -92,14 +99,17 @@ if api_key:
             ]
         )
 
+        # Create the QA chain and RAG chain
         question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
         rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
+        # Function to manage chat history based on session ID
         def get_session_history(session: str) -> BaseChatMessageHistory:
             if session_id not in st.session_state.store:
                 st.session_state.store[session_id] = ChatMessageHistory()
             return st.session_state.store[session_id]
 
+        # Combine the RAG chain with message history management
         conversational_rag_chain = RunnableWithMessageHistory(
             rag_chain, get_session_history,
             input_messages_key="input",
@@ -107,6 +117,7 @@ if api_key:
             output_messages_key="answer"
         )
 
+        # Input for user questions
         user_input = st.text_input("Your question:")
         if user_input:
             session_history = get_session_history(session_id)
@@ -116,7 +127,8 @@ if api_key:
                     "configurable": {"session_id": session_id}
                 },
             )
-            st.write("Assistant:", response['answer'])  # Extract and display only the answer
+            st.write("Assistant:", response['answer'])
             st.write("Chat History:", session_history.messages)
+
 else:
     st.warning("Please enter the Groq API Key")
